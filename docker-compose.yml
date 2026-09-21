@@ -1,0 +1,37 @@
+services:
+
+  orders-db:
+    image: postgres:16
+    container_name: orders-db
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: ordersuser
+      POSTGRES_PASSWORD: orderspass
+    networks:
+      - orders-network
+
+  orders-blue:
+    build: .
+    container_name: orders-blue
+    environment:
+      APP_VERSION: "7.8"
+      GIT_SHA: "initial"
+    ports:
+      - "8181:5000"
+    networks:
+      - orders-network
+
+  orders-green:
+    build: .
+    container_name: orders-green
+    environment:
+      APP_VERSION: "7.9"
+      GIT_SHA: "candidate"
+    ports:
+      - "8182:5000"
+    networks:
+      - orders-network
+
+networks:
+  orders-network:
+    name: orders-network
