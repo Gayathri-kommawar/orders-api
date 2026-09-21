@@ -72,12 +72,18 @@ pipeline {
         // ============================================================
         // 3. UNIT / APPLICATION TEST
         // ============================================================
-
-        stage('Unit/Application Test') {
+stage('Unit/Application Test') {
     steps {
-        bat 'python -m py_compile app\\app.py'
+        bat """
+            docker run --rm ^
+            -v "%WORKSPACE%:/workspace" ^
+            -w /workspace ^
+            python:3.12-slim ^
+            python -m py_compile app/app.py
+        """
     }
 }
+        
 
         // ============================================================
         // 4. DOCKER BUILD
