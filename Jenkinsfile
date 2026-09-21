@@ -5,7 +5,7 @@ pipeline {
         booleanParam(
             name: 'SIMULATE_FAILURE',
             defaultValue: false,
-            description: 'Set TRUE only to test health-check failure and rollback'
+            description: 'Enable to test deployment failure and automatic rollback'
         )
     }
 
@@ -25,10 +25,6 @@ pipeline {
 
     stages {
 
-        // ============================================================
-        // 1. CHECKOUT
-        // ============================================================
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -40,8 +36,7 @@ pipeline {
                     ).trim()
 
                     env.GIT_SHORT = env.GIT_SHA.take(7)
-
-                    env.IMAGE = "orders-api:${VERSION}-${BUILD_NUMBER}-${GIT_SHORT}"
+                    env.IMAGE = "orders-api:${VERSION}-${BUILD_NUMBER}-${env.GIT_SHORT}"
 
                     echo "Application : ${APP_NAME}"
                     echo "Version     : ${VERSION}"
@@ -51,71 +46,45 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // 2. VALIDATE VERSION
-        // ============================================================
-
         stage('Validate Version') {
             steps {
                 script {
                     if (!env.VERSION?.trim()) {
-                        error("Application version is missing")
+                        error("Version is missing")
                     }
 
                     echo "Version validation successful"
                     echo "Release Version: ${VERSION}"
-                    echo "Git Commit     : ${GIT_SHA}"
+                    echo "Git Commit: ${GIT_SHA}"
                 }
             }
         }
 
-        // ============================================================
-        // 3. UNIT / APPLICATION TEST
-        // ============================================================
-stage('Unit/Application Test') {
-    steps {
-        bat """
-            docker run --rm ^
-            -v "%WORKSPACE%:/workspace" ^
-            -w /workspace ^
-            python:3.12-slim ^
-            python -m py_compile app/app.py
-        """
-    }
-}
-        
-
-        // ============================================================
-        // 4. DOCKER BUILD
-        // ============================================================
+        stage('Unit/Application Test') {
+            steps {
+                bat """
+                    docker run --rm ^
+                    -v "%WORKSPACE%:/workspace" ^
+                    -w /workspace ^
+                    python:3.12-slim ^
+                    python -m py_compile app/app.py
+                """
+            }
+        }
 
         stage('Docker Build') {
             steps {
-                bat """
-                    docker build -t ${IMAGE} .
-                """
-
+                bat "docker build -t ${IMAGE} ."
                 echo "Docker image created successfully"
             }
         }
 
-        // ============================================================
-        // 5. DOCKER IMAGE VALIDATION
-        // ============================================================
-
         stage('Docker Image Validation') {
             steps {
-                bat """
-                    docker image inspect ${IMAGE}
-                """
-
+                bat "docker image inspect ${IMAGE}"
                 echo "Docker image validation successful"
             }
         }
-
-        // ============================================================
-        // 6. DETERMINE BLUE / GREEN
-        // ============================================================
 
         stage('Determine Deployment Color') {
             steps {
@@ -131,50 +100,34 @@ stage('Unit/Application Test') {
                         script: "docker inspect ${GREEN} >NUL 2>&1"
                     )
 
-                    /*
-                     * If BLUE is running:
-                     *     BLUE  = current production
-                     *     GREEN = candidate
-                     *
-                     * If GREEN is running:
-                     *     GREEN = current production
-                     *     BLUE  = candidate
-                     *
-                     * If neither exists:
-                     *     GREEN becomes first candidate
-                     */
-
                     if (blueExists == 0) {
 
                         env.CURRENT_CONTAINER = BLUE
                         env.CURRENT_PORT = BLUE_PORT
+                        env.CURRENT_COLOR = "BLUE"
 
                         env.CANDIDATE_CONTAINER = GREEN
                         env.CANDIDATE_PORT = GREEN_PORT
-
-                        env.CURRENT_COLOR = "BLUE"
                         env.CANDIDATE_COLOR = "GREEN"
 
                     } else if (greenExists == 0) {
 
                         env.CURRENT_CONTAINER = GREEN
                         env.CURRENT_PORT = GREEN_PORT
+                        env.CURRENT_COLOR = "GREEN"
 
                         env.CANDIDATE_CONTAINER = BLUE
                         env.CANDIDATE_PORT = BLUE_PORT
-
-                        env.CURRENT_COLOR = "GREEN"
                         env.CANDIDATE_COLOR = "BLUE"
 
                     } else {
 
                         env.CURRENT_CONTAINER = "NONE"
                         env.CURRENT_PORT = ""
+                        env.CURRENT_COLOR = "NONE"
 
                         env.CANDIDATE_CONTAINER = GREEN
                         env.CANDIDATE_PORT = GREEN_PORT
-
-                        env.CURRENT_COLOR = "NONE"
                         env.CANDIDATE_COLOR = "GREEN"
                     }
 
@@ -187,12 +140,9 @@ stage('Unit/Application Test') {
             }
         }
 
-        // ============================================================
-        // 7. START CANDIDATE
-        // ============================================================
-
         stage('Start Candidate') {
             steps {
+
                 bat """
                     docker rm -f ${CANDIDATE_CONTAINER} >NUL 2>&1
                     exit /b 0
@@ -212,19 +162,12 @@ stage('Unit/Application Test') {
             }
         }
 
-        // ============================================================
-        // 8. CONTAINER VALIDATION
-        // ============================================================
-
         stage('Container Validation') {
             steps {
-                bat """
-                    docker ps --filter "name=${CANDIDATE_CONTAINER}"
-                """
 
-                bat """
-                    docker inspect ${CANDIDATE_CONTAINER}
-                """
+                bat "docker ps --filter \"name=${CANDIDATE_CONTAINER}\""
+
+                bat "docker inspect ${CANDIDATE_CONTAINER}"
 
                 script {
                     def running = bat(
@@ -241,66 +184,45 @@ stage('Unit/Application Test') {
             }
         }
 
-        // ============================================================
-        // 9. APPLICATION HEALTH CHECK
-        // ============================================================
-
         stage('Application Health Check') {
             steps {
                 script {
 
                     if (params.SIMULATE_FAILURE) {
 
+                        echo "=========================================="
                         echo "FAILURE TEST ENABLED"
-                        echo "Health check will intentionally use an invalid port"
+                        echo "Intentionally checking invalid port 8199"
+                        echo "=========================================="
 
                         bat """
-                            powershell -NoProfile -Command ^
-                            "\$r=Invoke-WebRequest http://localhost:8199/health -UseBasicParsing; ^
-                            if (\$r.StatusCode -ne 200) { exit 1 }"
+                            powershell -NoProfile -Command "\$r=Invoke-WebRequest -Uri 'http://localhost:8199/health' -UseBasicParsing; if (\$r.StatusCode -ne 200) { exit 1 }"
                         """
 
                     } else {
 
                         bat """
-                            powershell -NoProfile -Command ^
-                            "\$r=Invoke-WebRequest http://localhost:${CANDIDATE_PORT}/health -UseBasicParsing; ^
-                            if (\$r.StatusCode -ne 200) { exit 1 }; ^
-                            Write-Host \$r.Content"
+                            powershell -NoProfile -Command "\$r=Invoke-WebRequest -Uri 'http://localhost:${CANDIDATE_PORT}/health' -UseBasicParsing; if (\$r.StatusCode -ne 200) { exit 1 }; Write-Host \$r.Content"
                         """
                     }
                 }
             }
         }
 
-        // ============================================================
-        // 10. INTEGRATION CHECK
-        // ============================================================
-
         stage('Integration Check') {
             steps {
 
                 bat """
-                    powershell -NoProfile -Command ^
-                    "\$r=Invoke-WebRequest http://localhost:${CANDIDATE_PORT}/ -UseBasicParsing; ^
-                    if (\$r.StatusCode -ne 200) { exit 1 }; ^
-                    Write-Host \$r.Content"
+                    powershell -NoProfile -Command "\$r=Invoke-WebRequest -Uri 'http://localhost:${CANDIDATE_PORT}/' -UseBasicParsing; if (\$r.StatusCode -ne 200) { exit 1 }; Write-Host \$r.Content"
                 """
 
                 bat """
-                    powershell -NoProfile -Command ^
-                    "\$r=Invoke-WebRequest http://localhost:${CANDIDATE_PORT}/orders -UseBasicParsing; ^
-                    if (\$r.StatusCode -ne 200) { exit 1 }; ^
-                    Write-Host \$r.Content"
+                    powershell -NoProfile -Command "\$r=Invoke-WebRequest -Uri 'http://localhost:${CANDIDATE_PORT}/orders' -UseBasicParsing; if (\$r.StatusCode -ne 200) { exit 1 }; Write-Host \$r.Content"
                 """
 
                 echo "Integration checks successful"
             }
         }
-
-        // ============================================================
-        // 11. TRAFFIC SWITCH
-        // ============================================================
 
         stage('Traffic Switch') {
             steps {
@@ -312,15 +234,7 @@ stage('Unit/Application Test') {
 
                     echo "Old Production : ${CURRENT_COLOR}"
                     echo "New Production : ${CANDIDATE_COLOR}"
-                    echo "New Version    : ${VERSION}"
-                    echo "New Port       : ${CANDIDATE_PORT}"
-
-                    /*
-                     * Simplified blue-green traffic switch.
-                     *
-                     * The validated candidate becomes the active
-                     * production container.
-                     */
+                    echo "Version        : ${VERSION}"
 
                     env.ACTIVE_CONTAINER = env.CANDIDATE_CONTAINER
                     env.ACTIVE_PORT = env.CANDIDATE_PORT
@@ -331,18 +245,13 @@ stage('Unit/Application Test') {
             }
         }
 
-        // ============================================================
-        // 12. OLD VERSION CLEANUP
-        // ============================================================
-
         stage('Old Version Cleanup') {
             steps {
                 script {
 
                     if (env.CURRENT_CONTAINER != "NONE") {
 
-                        echo "Removing old production container:"
-                        echo "${CURRENT_CONTAINER}"
+                        echo "Removing old production container: ${CURRENT_CONTAINER}"
 
                         bat """
                             docker rm -f ${CURRENT_CONTAINER} >NUL 2>&1
@@ -350,37 +259,24 @@ stage('Unit/Application Test') {
                         """
 
                     } else {
-
-                        echo "No previous production container exists."
+                        echo "No previous production container exists"
                     }
                 }
             }
         }
 
-        // ============================================================
-        // 13. DEPLOYMENT VERIFICATION
-        // ============================================================
-
         stage('Deployment Verification') {
             steps {
 
                 bat """
-                    powershell -NoProfile -Command ^
-                    "\$r=Invoke-WebRequest http://localhost:${ACTIVE_PORT}/health -UseBasicParsing; ^
-                    if (\$r.StatusCode -ne 200) { exit 1 }; ^
-                    Write-Host \$r.Content"
+                    powershell -NoProfile -Command "\$r=Invoke-WebRequest -Uri 'http://localhost:${ACTIVE_PORT}/health' -UseBasicParsing; if (\$r.StatusCode -ne 200) { exit 1 }; Write-Host \$r.Content"
                 """
 
                 bat """
-                    powershell -NoProfile -Command ^
-                    "\$r=Invoke-WebRequest http://localhost:${ACTIVE_PORT}/ -UseBasicParsing; ^
-                    if (\$r.StatusCode -ne 200) { exit 1 }; ^
-                    Write-Host \$r.Content"
+                    powershell -NoProfile -Command "\$r=Invoke-WebRequest -Uri 'http://localhost:${ACTIVE_PORT}/' -UseBasicParsing; if (\$r.StatusCode -ne 200) { exit 1 }; Write-Host \$r.Content"
                 """
 
-                bat """
-                    docker ps
-                """
+                bat "docker ps"
 
                 echo "=========================================="
                 echo "DEPLOYMENT VERIFICATION SUCCESSFUL"
@@ -393,10 +289,6 @@ stage('Unit/Application Test') {
             }
         }
     }
-
-    // ================================================================
-    // POST BUILD
-    // ================================================================
 
     post {
 
@@ -416,31 +308,20 @@ stage('Unit/Application Test') {
         failure {
             echo "=========================================="
             echo "DEPLOYMENT FAILED"
-            echo "ROLLBACK STARTED"
+            echo "AUTOMATIC ROLLBACK STARTED"
             echo "=========================================="
 
             script {
 
-                /*
-                 * Remove only the failed candidate.
-                 *
-                 * The current production container is NOT removed.
-                 */
-
                 if (env.CANDIDATE_CONTAINER) {
 
-                    echo "Removing failed candidate:"
-                    echo "${CANDIDATE_CONTAINER}"
+                    echo "Removing failed candidate: ${CANDIDATE_CONTAINER}"
 
                     bat """
                         docker rm -f ${CANDIDATE_CONTAINER} >NUL 2>&1
                         exit /b 0
                     """
                 }
-
-                echo "=========================================="
-                echo "ROLLBACK COMPLETE"
-                echo "=========================================="
 
                 if (env.CURRENT_CONTAINER &&
                     env.CURRENT_CONTAINER != "NONE") {
@@ -449,33 +330,25 @@ stage('Unit/Application Test') {
                     echo "${CURRENT_CONTAINER}"
                     echo "Production Port: ${CURRENT_PORT}"
 
-                    bat """
-                        docker ps --filter "name=${CURRENT_CONTAINER}"
-                    """
-
-                    bat """
-                        powershell -NoProfile -Command ^
-                        "\$r=Invoke-WebRequest http://localhost:${CURRENT_PORT}/health -UseBasicParsing; ^
-                        if (\$r.StatusCode -ne 200) { exit 1 }; ^
-                        Write-Host 'Previous production is healthy'"
-                    """
+                    bat "docker ps --filter \"name=${CURRENT_CONTAINER}\""
 
                 } else {
 
                     echo "No previous production container was available."
                 }
-            }
 
-            echo "=========================================="
-            echo "FAILED CANDIDATE REMOVED"
-            echo "PREVIOUS VERSION PRESERVED"
-            echo "=========================================="
+                echo "=========================================="
+                echo "ROLLBACK COMPLETE"
+                echo "FAILED CANDIDATE REMOVED"
+                echo "PREVIOUS VERSION PRESERVED"
+                echo "=========================================="
+            }
         }
 
         always {
             echo "=========================================="
             echo "JENKINS DEPLOYMENT PIPELINE FINISHED"
-            echo "Build Number: ${BUILD_NUMBER}"
+            echo "BUILD NUMBER: ${BUILD_NUMBER}"
             echo "=========================================="
         }
     }
